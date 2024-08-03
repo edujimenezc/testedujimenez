@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 import subprocess
 import os
 import json
@@ -18,19 +18,20 @@ def check_docker():
 def execute_smartbugs():
     docker_running, docker_info = check_docker()
     if not docker_running:
-        return {'error': 'Docker no está corriendo o no es accesible', 'details': docker_info}, 500
+        return jsonify({'error': 'Docker no está corriendo o no es accesible', 'details': docker_info}), 500
 
     # Obtener el texto del cuerpo de la solicitud
     data = request.get_json()
     if not data or 'contractCode' not in data:
-        return {'error': 'No se proporcionó el campo "contractCode"'}, 400
+        return jsonify({'error': 'No se proporcionó el campo "contractCode"'}), 400
 
     contract_code = data['contractCode']
 
     # Ruta al directorio de SmartBugs
     smartbugs_path = os.path.join(os.getcwd())
+    print(smartbugs_path)
     if not os.path.exists(smartbugs_path):
-        return {'error': f'El directorio {smartbugs_path} no existe'}, 500
+        return jsonify({'error': f'El directorio {smartbugs_path} no existe'}), 500
 
     # Crear el archivo test.hex con el contenido proporcionado
     test_file_path = os.path.join(smartbugs_path, 'test.hex')
@@ -38,42 +39,61 @@ def execute_smartbugs():
         with open(test_file_path, 'w') as file:
             file.write(contract_code)
     except Exception as e:
-        return {'error': f'Error al crear el archivo: {str(e)}'}, 500
+        return jsonify({'error': f'Error al crear el archivo: {str(e)}'}), 500
 
     # Comando para ejecutar SmartBugs
-    command = ['python', '-m', 'sb', "-t", "mythril", "--runtime", "--processes", "10", "--results", smartbugs_path, "--json", "-f", test_file_path]
+    command = [
+        'python3', '-m', 'sb', '-t', 'mythril', '--runtime',
+        '--processes', '10', '--results', smartbugs_path+"/resultados", '--json', '-f', test_file_path
+    ]
 
-    try:
-        print("Ejecutando SmartBugs...")
-        result = subprocess.run(command, cwd=smartbugs_path, capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            print("ERROR:" + result.stderr)
-            print("ERROR:" + result.stdout)
-            return jsonify({'error': 'Error al ejecutar SmartBugs', 'details': result.stdout}), 500
-        
-        # Leer el archivo JSON generado por SmartBugs
-        output_file_path = os.path.join(smartbugs_path, 'results.json')  # Ajusta esto al nombre y ubicación correctos del archivo JSON
-        if not os.path.exists(output_file_path):
-            return {'error': 'No se encontró el archivo de resultados JSON'}, 500
+    def generate():
+        try:
+            print("Ejecutando SmartBugs...")
+            process = subprocess.Popen(command, cwd=smartbugs_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-        with open(output_file_path, 'r') as json_file:
-            output_data = json.load(json_file)
+            # Leer stdout y stderr línea por línea
+            for line in iter(process.stdout.readline, ''):
+                print(f"STDOUT: {line.strip()}")
+                yield f"data: {line.strip()}\n\n"  # Envía cada línea al cliente
 
-        # Suponiendo que el archivo JSON tiene una estructura conocida, extraer los datos necesarios
-        address = output_data.get('address', 'N/A')  # Reemplaza con la clave real si es diferente
-        contract_analysis_txt = json.dumps(output_data)  # Convierte el JSON completo a texto para el análisis
+            # Procesar errores en stderr
+            for line in iter(process.stderr.readline, ''):
+                print(f"STDERR: {line.strip()}")
+                yield f"error: {line.strip()}\n\n"
 
-        # Construir la respuesta con los dos campos específicos
-        response = {
-            'address': address,
-            'contractAnalysisTxt': contract_analysis_txt
-        }
+            process.stdout.close()
+            process.stderr.close()
+            return_code = process.wait()
+            if return_code != 0:
+                yield f"error: El proceso SmartBugs terminó con el código de retorno {return_code}.\n\n"
+                return
 
-        return jsonify(response), 200
+            # Leer el archivo JSON generado por SmartBugs
+            output_file_path = os.path.join(smartbugs_path, 'results.json')  # Ajusta esto al nombre y ubicación correctos del archivo JSON
+            if not os.path.exists(output_file_path):
+                yield 'error: No se encontró el archivo de resultados JSON\n\n'
+                return
 
-    except Exception as e:
-        return {'error': f'Error al ejecutar SmartBugs: {str(e)}'}, 500
+            with open(output_file_path, 'r') as json_file:
+                output_data = json.load(json_file)
+
+            # Suponiendo que el archivo JSON tiene una estructura conocida, extraer los datos necesarios
+            address = output_data.get('address', 'N/A')  # Reemplaza con la clave real si es diferente
+            contract_analysis_txt = json.dumps(output_data)  # Convierte el JSON completo a texto para el análisis
+
+            # Construir la respuesta con los dos campos específicos
+            response = {
+                'address': address,
+                'contractAnalysisTxt': contract_analysis_txt
+            }
+
+            yield f"data: {json.dumps(response)}\n\n"
+
+        except Exception as e:
+            yield f"error: Error al ejecutar SmartBugs: {str(e)}\n\n"
+
+    return Response(generate(), mimetype='text/event-stream')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
