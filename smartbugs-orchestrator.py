@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
 import subprocess
 import os
 import json
@@ -29,7 +29,6 @@ def execute_smartbugs():
 
     # Ruta al directorio de SmartBugs
     smartbugs_path = os.path.join(os.getcwd())
-    print(smartbugs_path)
     if not os.path.exists(smartbugs_path):
         return jsonify({'error': f'El directorio {smartbugs_path} no existe'}), 500
 
@@ -47,53 +46,40 @@ def execute_smartbugs():
         '--processes', '10', '--results', smartbugs_path+"/resultados", '--json', '-f', test_file_path
     ]
 
-    def generate():
-        try:
-            print("Ejecutando SmartBugs...")
-            process = subprocess.Popen(command, cwd=smartbugs_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        print("Ejecutando SmartBugs...")
+        process = subprocess.Popen(command, cwd=smartbugs_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-            # Leer stdout y stderr línea por línea
-            for line in iter(process.stdout.readline, ''):
-                print(f"STDOUT: {line.strip()}")
-                yield f"data: {line.strip()}\n\n"  # Envía cada línea al cliente
+        # Capturar toda la salida de stdout y stderr
+        stdout, stderr = process.communicate()
 
-            # Procesar errores en stderr
-            for line in iter(process.stderr.readline, ''):
-                print(f"STDERR: {line.strip()}")
-                yield f"error: {line.strip()}\n\n"
+        # Verificar el código de retorno
+        if process.returncode != 0:
+            print(f"ERROR: {stderr}")
+            return jsonify({'error': 'Error al ejecutar SmartBugs', 'details': stderr}), 500
 
-            process.stdout.close()
-            process.stderr.close()
-            return_code = process.wait()
-            if return_code != 0:
-                yield f"error: El proceso SmartBugs terminó con el código de retorno {return_code}.\n\n"
-                return
+        # Leer el archivo JSON generado por SmartBugs
+        output_file_path = os.path.join(smartbugs_path, 'resultados', 'results.json')  # Ajusta esto al nombre y ubicación correctos del archivo JSON
+        if not os.path.exists(output_file_path):
+            return jsonify({'error': 'No se encontró el archivo de resultados JSON'}), 500
 
-            # Leer el archivo JSON generado por SmartBugs
-            output_file_path = os.path.join(smartbugs_path, 'results.json')  # Ajusta esto al nombre y ubicación correctos del archivo JSON
-            if not os.path.exists(output_file_path):
-                yield 'error: No se encontró el archivo de resultados JSON\n\n'
-                return
+        with open(output_file_path, 'r') as json_file:
+            output_data = json.load(json_file)
 
-            with open(output_file_path, 'r') as json_file:
-                output_data = json.load(json_file)
+        # Suponiendo que el archivo JSON tiene una estructura conocida, extraer los datos necesarios
+        address = output_data.get('address', 'N/A')  # Reemplaza con la clave real si es diferente
+        contract_analysis_txt = json.dumps(output_data)  # Convierte el JSON completo a texto para el análisis
 
-            # Suponiendo que el archivo JSON tiene una estructura conocida, extraer los datos necesarios
-            address = output_data.get('address', 'N/A')  # Reemplaza con la clave real si es diferente
-            contract_analysis_txt = json.dumps(output_data)  # Convierte el JSON completo a texto para el análisis
+        # Construir la respuesta con los dos campos específicos
+        response = {
+            'address': address,
+            'contractAnalysisTxt': contract_analysis_txt
+        }
 
-            # Construir la respuesta con los dos campos específicos
-            response = {
-                'address': address,
-                'contractAnalysisTxt': contract_analysis_txt
-            }
+        return jsonify(response), 200
 
-            yield f"data: {json.dumps(response)}\n\n"
-
-        except Exception as e:
-            yield f"error: Error al ejecutar SmartBugs: {str(e)}\n\n"
-
-    return Response(generate(), mimetype='text/event-stream')
+    except Exception as e:
+        return jsonify({'error': f'Error al ejecutar SmartBugs: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
